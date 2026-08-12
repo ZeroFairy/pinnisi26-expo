@@ -16,12 +16,17 @@ Flow:
   1. WAIT_HOLD   : both players must hold their button down together.
   2. HOLDING     : once both are held, count 3 seconds; light one more
                    LED each second. Releasing early cancels and resets.
-  3. GO          : all 3 LEDs lit, buzzer beeps, screen shows "GAME START".
-  4. SUSPENSE    : pick a random delay (1-10s), show a countdown on screen.
-                   Buzzer ticks each second to build pressure.
+  3. GO          : all LEDs lit, buzzer beeps, screen shows "GAME START".
+  4. ROULETTE    : the monitor spins rapidly through numbers 1-10 like a
+                   slot machine (buzzer ticks each flip), gradually
+                   slowing down until it lands on the random time.
                    Pressing your button here = FALSE START = you lose.
-  5. LIVE        : the instant the countdown hits 0, first press wins.
-  6. RESULT      : split-screen shows the winning side, LEDs flash on
+  5. COUNTDOWN   : the number it landed on is now shown counting down to
+                   0 on screen, one second at a time, buzzer ticking
+                   each second to build pressure. Pressing early here
+                   still = FALSE START = you lose.
+  6. LIVE        : the instant the countdown hits 0, first press wins.
+  7. RESULT      : split-screen shows the winning side, LEDs flash on
                    winner's side, buzzer plays a short win sound.
                    After a few seconds, resets to WAIT_HOLD.
 
@@ -58,9 +63,15 @@ LED_PINS = [
 BUZZER_PIN = 18
 
 HOLD_SECONDS = 3.0
-MIN_SUSPENSE = 1.0
-MAX_SUSPENSE = 10.0
 RESULT_DISPLAY_SECONDS = 4.0
+
+# Roulette (the "spinning number" reveal of the random countdown time)
+MIN_SUSPENSE_INT = 1
+MAX_SUSPENSE_INT = 10
+ROULETTE_MIN_FLIPS = 14        # minimum number of number-changes before landing
+ROULETTE_MAX_FLIPS = 20
+ROULETTE_START_INTERVAL = 0.05  # seconds between flips at the start (fast)
+ROULETTE_END_INTERVAL = 0.35    # seconds between flips right before landing (slow)
 
 SCREEN_SIZE = (1024, 600)  # change to match your monitor, or use (0,0) for native fullscreen
 FPS = 60
@@ -174,7 +185,8 @@ class Hardware:
 WAIT_HOLD = "WAIT_HOLD"
 HOLDING = "HOLDING"
 GO = "GO"
-SUSPENSE = "SUSPENSE"
+ROULETTE = "ROULETTE"
+COUNTDOWN = "COUNTDOWN"
 LIVE = "LIVE"
 RESULT = "RESULT"
 
@@ -192,9 +204,14 @@ class Game:
         self.state = WAIT_HOLD
         self.hold_start_time = None
         self.leds_lit = 0
-        self.suspense_target = None
-        self.suspense_start = None
-        self.last_tick_second = None
+        self.roulette_display = None
+        self.roulette_final = None
+        self.roulette_flip_count = 0
+        self.roulette_total_flips = 0
+        self.roulette_next_change_time = None
+        self.countdown_target = None
+        self.countdown_remaining = None
+        self.last_countdown_tick = None
         self.live_start_time = None
         self.winner = None
         self.result_start_time = None
@@ -233,36 +250,64 @@ class Game:
                 self.go_shown_at = time.time()
 
         elif self.state == GO:
-            # brief "GAME START" splash, then move to suspense
+            # brief "GAME START" splash, then move to the roulette spin
             if time.time() - self.go_shown_at >= 0.8:
-                self.suspense_target = random.uniform(MIN_SUSPENSE, MAX_SUSPENSE)
-                self.suspense_start = time.time()
-                self.last_tick_second = None
-                self.state = SUSPENSE
+                self._start_roulette()
 
-        elif self.state == SUSPENSE:
-            # false start check
+        elif self.state == ROULETTE:
+            # false start check -> pressing during the spin loses instantly
             if left or right:
                 self.winner = "RIGHT" if left and not right else \
                                "LEFT" if right and not left else None
-                # if both pressed simultaneously somehow, treat as no-winner/tie -> just restart
                 if self.winner is None:
                     self.reset_to_wait()
                     return
                 self._enter_result(false_start=True)
                 return
 
-            elapsed = time.time() - self.suspense_start
-            remaining = self.suspense_target - elapsed
-            sec_left = max(0, int(remaining) + 1)
-            if sec_left != self.last_tick_second:
-                self.last_tick_second = sec_left
-                self.hw.beep_async_tick()
+            now = time.time()
+            if now >= self.roulette_next_change_time:
+                self.roulette_flip_count += 1
+                if self.roulette_flip_count >= self.roulette_total_flips:
+                    # landed on the final number
+                    self.roulette_display = self.roulette_final
+                    self.hw.beep(0.15)
+                    self.countdown_target = self.roulette_final
+                    self.countdown_remaining = self.roulette_final
+                    self.last_countdown_tick = now
+                    self.state = COUNTDOWN
+                else:
+                    # keep spinning through random numbers, slowing down
+                    # (ease-out) as it approaches the final flip
+                    self.roulette_display = random.randint(MIN_SUSPENSE_INT, MAX_SUSPENSE_INT)
+                    self.hw.beep_async_tick()
+                    progress = self.roulette_flip_count / self.roulette_total_flips
+                    interval = ROULETTE_START_INTERVAL + progress * (
+                        ROULETTE_END_INTERVAL - ROULETTE_START_INTERVAL
+                    )
+                    self.roulette_next_change_time = now + interval
 
-            if elapsed >= self.suspense_target:
-                self.state = LIVE
-                self.live_start_time = time.time()
-                self.hw.leds_all(False)
+        elif self.state == COUNTDOWN:
+            # false start check -> pressing during the countdown loses instantly
+            if left or right:
+                self.winner = "RIGHT" if left and not right else \
+                               "LEFT" if right and not left else None
+                if self.winner is None:
+                    self.reset_to_wait()
+                    return
+                self._enter_result(false_start=True)
+                return
+
+            now = time.time()
+            if now - self.last_countdown_tick >= 1.0:
+                self.last_countdown_tick = now
+                self.countdown_remaining -= 1
+                if self.countdown_remaining > 0:
+                    self.hw.beep_async_tick()
+                else:
+                    self.state = LIVE
+                    self.live_start_time = now
+                    self.hw.leds_all(False)
 
         elif self.state == LIVE:
             if left and right:
@@ -279,6 +324,14 @@ class Game:
         elif self.state == RESULT:
             if time.time() - self.result_start_time >= RESULT_DISPLAY_SECONDS:
                 self.reset_to_wait()
+
+    def _start_roulette(self):
+        self.roulette_final = random.randint(MIN_SUSPENSE_INT, MAX_SUSPENSE_INT)
+        self.roulette_display = random.randint(MIN_SUSPENSE_INT, MAX_SUSPENSE_INT)
+        self.roulette_flip_count = 0
+        self.roulette_total_flips = random.randint(ROULETTE_MIN_FLIPS, ROULETTE_MAX_FLIPS)
+        self.roulette_next_change_time = time.time() + ROULETTE_START_INTERVAL
+        self.state = ROULETTE
 
     def _enter_result(self, false_start):
         self.false_start = false_start
@@ -307,9 +360,13 @@ class Game:
         elif self.state == GO:
             self._center_text("GAME START!", self.font_big, COLOR_ACCENT, h // 2)
 
-        elif self.state == SUSPENSE:
-            self._center_text("GET READY...", self.font_mid, COLOR_TEXT, h // 2 - 40)
-            self._center_text("!", self.font_big, (200, 30, 30), h // 2 + 40)
+        elif self.state == ROULETTE:
+            self._center_text("SELECTING TIME...", self.font_small, COLOR_TEXT, h // 2 - 120)
+            self._center_text(str(self.roulette_display), self.font_big, COLOR_ACCENT, h // 2 + 10)
+
+        elif self.state == COUNTDOWN:
+            self._center_text("GET READY...", self.font_small, COLOR_TEXT, h // 2 - 120)
+            self._center_text(str(self.countdown_remaining), self.font_big, (200, 30, 30), h // 2 + 10)
 
         elif self.state == LIVE:
             self._split_screen(None)
