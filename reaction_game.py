@@ -4,13 +4,20 @@ Two-Player Reaction Game — Raspberry Pi 5
 ==========================================
 
 Hardware (BCM pin numbers):
-  Button 1 (Player LEFT)  -> GPIO17 -> GND
-  Button 2 (Player RIGHT) -> GPIO27 -> GND
+  Button 1 (Player LEFT)  -> GPIO17 -> GND   [ = BLUE side on screen ]
+  Button 2 (Player RIGHT) -> GPIO27 -> GND   [ = RED side on screen  ]
   LED 1                   -> GPIO5  (+resistor) -> GND
   LED 2                   -> GPIO6  (+resistor) -> GND
   LED 3                   -> GPIO13 (+resistor) -> GND
   Buzzer (active buzzer)  -> GPIO18 -> GND
   Monitor                 -> HDMI (pygame fullscreen)
+
+  >>> Button/color match-up: whichever physical button is wired to
+      GPIO17 (LEFT) always controls/represents the BLUE side of the
+      split-screen, and the button on GPIO27 (RIGHT) always controls
+      the RED side. In --sim mode, "A"/Left-arrow = BLUE (left),
+      "L"/Right-arrow = RED (right). The WAIT_HOLD screen also prints
+      these labels so it's visible at a glance while playing.
 
 Flow:
   1. WAIT_HOLD   : both players must hold their button down together.
@@ -35,7 +42,9 @@ Install deps:
 
 Run:
   python3 reaction_game.py
-  (add --sim to run without real GPIO hardware, using keyboard L/R keys)
+  (add --sim to run without real GPIO hardware, using keyboard keys)
+  Sim controls: "A" (or Left-arrow) = LEFT/BLUE,
+                "L" (or Right-arrow) = RIGHT/RED
 """
 
 import sys
@@ -348,7 +357,8 @@ class Game:
 
         if self.state == WAIT_HOLD:
             self._center_text("HOLD BOTH BUTTONS TO START", self.font_mid, COLOR_TEXT, h // 2 - 40)
-            self._center_text("Player Left & Player Right", self.font_small, COLOR_ACCENT, h // 2 + 30)
+            self._center_text("LEFT button = BLUE side", self.font_small, COLOR_LEFT, h // 2 + 30)
+            self._center_text("RIGHT button = RED side", self.font_small, COLOR_RIGHT, h // 2 + 65)
 
         elif self.state == HOLDING:
             elapsed = time.time() - self.hold_start_time
@@ -394,6 +404,19 @@ class Game:
             left_color = tuple(c // 3 for c in COLOR_LEFT)
         pygame.draw.rect(self.screen, left_color, (0, 0, w // 2, h))
         pygame.draw.rect(self.screen, right_color, (w // 2, 0, w // 2, h))
+        self._left_text("BLUE = LEFT", self.font_small, (255, 255, 255), 20, 20)
+        self._right_text("RED = RIGHT", self.font_small, (255, 255, 255), w - 20, 20)
+
+    def _left_text(self, text, font, color, x, y):
+        surf = font.render(text, True, color)
+        self.screen.blit(surf, (x, y))
+
+    def _right_text(self, text, font, color, x, y):
+        surf = font.render(text, True, color)
+        rect = surf.get_rect()
+        rect.right = x
+        rect.top = y
+        self.screen.blit(surf, rect)
 
     def _center_text(self, text, font, color, y):
         w, _ = self.screen.get_size()
