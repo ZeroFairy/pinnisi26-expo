@@ -45,7 +45,16 @@ import pygame
 # ---------------------------------------------------------------------------
 BTN_LEFT_PIN = 17
 BTN_RIGHT_PIN = 27
-LED_PINS = [5, 6, 13]
+
+# Currently only 2 LEDs wired up. LED 3 is commented out for now —
+# when you add the 3rd LED, just uncomment its pin below and it will
+# automatically be picked up everywhere (countdown, progress, blink),
+# since all LED logic scales off len(LED_PINS).
+LED_PINS = [
+    5,
+    6,
+    # 13,  # LED 3 -- uncomment once wired up
+]
 BUZZER_PIN = 18
 
 HOLD_SECONDS = 3.0
@@ -73,6 +82,8 @@ class Hardware:
         self.simulate = simulate
         self._sim_left = False
         self._sim_right = False
+
+        self.num_leds = len(LED_PINS)  # everything below scales off this
 
         if not simulate:
             from gpiozero import Button, LED, Buzzer
@@ -105,14 +116,14 @@ class Hardware:
 
     # --- LEDs ---
     def leds_set(self, count_on):
-        """Light up the first `count_on` of the 3 LEDs (0-3)."""
+        """Light up the first `count_on` LEDs (0..num_leds)."""
         if self.simulate:
             return
         for i, led in enumerate(self.leds):
             led.value = 1 if i < count_on else 0
 
     def leds_all(self, on):
-        self.leds_set(3 if on else 0)
+        self.leds_set(self.num_leds if on else 0)
 
     def leds_blink(self, times=3, interval=0.15):
         if self.simulate:
@@ -207,7 +218,11 @@ class Game:
                 self.reset_to_wait()
                 return
             elapsed = time.time() - self.hold_start_time
-            target_lit = min(3, int(elapsed // 1.0) + 1) if elapsed < HOLD_SECONDS else 3
+            n = self.hw.num_leds
+            # spread the LED-per-second lighting evenly across HOLD_SECONDS,
+            # regardless of how many LEDs are currently wired up
+            step = HOLD_SECONDS / n
+            target_lit = min(n, int(elapsed // step) + 1) if elapsed < HOLD_SECONDS else n
             if target_lit != self.leds_lit:
                 self.leds_lit = target_lit
                 self.hw.leds_set(self.leds_lit)
@@ -269,7 +284,7 @@ class Game:
         self.false_start = false_start
         self.state = RESULT
         self.result_start_time = time.time()
-        self.hw.leds_blink(times=3, interval=0.12)
+        self.hw.leds_blink(times=self.hw.num_leds, interval=0.12)
         self.hw.leds_all(True)
         self.hw.win_fanfare()
 
@@ -285,7 +300,8 @@ class Game:
         elif self.state == HOLDING:
             elapsed = time.time() - self.hold_start_time
             self._center_text("HOLD...", self.font_mid, COLOR_TEXT, h // 2 - 80)
-            dots = "● " * self.leds_lit + "○ " * (3 - self.leds_lit)
+            n = self.hw.num_leds
+            dots = "● " * self.leds_lit + "○ " * (n - self.leds_lit)
             self._center_text(dots, self.font_big, COLOR_ACCENT, h // 2 + 10)
 
         elif self.state == GO:
