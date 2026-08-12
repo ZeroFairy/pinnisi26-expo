@@ -4,28 +4,40 @@ Two-Player Tug-of-War Game — Raspberry Pi 5
 =============================================
 
 Hardware (BCM pin numbers) — same wiring as reaction_game.py:
-  Button 1 (Player LEFT)  -> GPIO17 -> GND
-  Button 2 (Player RIGHT) -> GPIO27 -> GND
+  Button 1 (Player LEFT)  -> GPIO17 -> GND   [ = BLUE side on screen ]
+  Button 2 (Player RIGHT) -> GPIO27 -> GND   [ = RED side on screen  ]
   LED 1                   -> GPIO5  (+resistor) -> GND
   LED 2                   -> GPIO6  (+resistor) -> GND
   LED 3                   -> GPIO13 (+resistor) -> GND
   Buzzer (active buzzer)  -> GPIO18 -> GND
   Monitor                 -> HDMI (pygame fullscreen)
 
+  >>> Button/color match-up: whichever physical button is wired to
+      GPIO17 (LEFT) always controls the BLUE side of the bar, and the
+      button on GPIO27 (RIGHT) always controls the RED side. In --sim
+      mode, "A"/Left-arrow = BLUE (left), "L"/Right-arrow = RED (right).
+      The in-game screen also prints these labels during WAIT_HOLD and
+      TUG so it's visible at a glance while playing.
+
 Flow:
   1. WAIT_HOLD : both players hold their button together to arm the round.
   2. HOLDING   : hold for 3 seconds, one LED lights per second.
-  3. GO        : buzzer beeps, screen flashes "PULL!" and the rope marker
-                 starts centered on the progress bar.
-  4. TUG       : each button TAP (press edge, not hold) pulls the rope
-                 marker toward your side. The marker also slowly drifts
-                 back to center every frame, so mashing continuously is
-                 required to keep winning — a single tap won't hold it.
-                 LEDs mirror how close the marker is to your edge (all 3
-                 lit = you're one tap-streak away from winning).
-  5. RESULT    : whoever drags the marker fully to their edge wins.
-                 Split-screen flash on the monitor + LED blink + buzzer
-                 fanfare, then auto-resets to WAIT_HOLD.
+  3. GO        : buzzer beeps, screen flashes "PULL!" and the tug bar
+                 starts as an even 50/50 blue/red split.
+  4. TUG       : each button TAP (press edge, not hold) pulls the color
+                 boundary toward your side. Instead of a ball/marker,
+                 your color itself visibly grows and creeps across the
+                 bar as you win ground — moving diagonal stripes animate
+                 through the leading color so it's obvious in real time
+                 which side is taking over. The boundary also slowly
+                 drifts back to center every frame, so mashing
+                 continuously is required to keep winning — a single tap
+                 won't hold it. LEDs mirror how close your color is to
+                 fully covering the bar (all 3 lit = one tap-streak away
+                 from winning).
+  5. RESULT    : whoever's color fully covers the bar wins. Split-screen
+                 flash on the monitor + LED blink + buzzer fanfare, then
+                 auto-resets to WAIT_HOLD.
 
 Install deps:
   pip install gpiozero pygame --break-system-packages
@@ -33,9 +45,10 @@ Install deps:
 Run:
   python3 tug_of_war.py
   (add --sim to run without real GPIO hardware, using keyboard keys)
-  Sim controls: mash "A" for LEFT, mash "L" for RIGHT (tap repeatedly,
-  key-repeat is disabled so each physical keypress = one tap, just like
-  a real button)
+  Sim controls: mash "A" (or Left-arrow) for LEFT/BLUE,
+                mash "L" (or Right-arrow) for RIGHT/RED
+  (tap repeatedly, key-repeat is disabled so each physical keypress =
+  one tap, just like a real button)
 """
 
 import sys
@@ -219,6 +232,7 @@ class Game:
         self.winner = None
         self.result_start_time = None
         self.last_frame_time = time.time()
+        self.anim_time = 0.0  # drives the moving stripes on the leading color
         self.hw.leds_all(False)
         # drain any queued sim taps so they don't leak into next round
         self.hw.poll_taps()
@@ -243,6 +257,7 @@ class Game:
         now = time.time()
         dt = now - self.last_frame_time
         self.last_frame_time = now
+        self.anim_time += dt
 
         if self.state == WAIT_HOLD:
             self.hw.poll_taps()  # discard stray taps
@@ -331,7 +346,8 @@ class Game:
 
         if self.state == WAIT_HOLD:
             self._center_text("HOLD BOTH BUTTONS TO START", self.font_mid, COLOR_TEXT, h // 2 - 40)
-            self._center_text("Player Left & Player Right", self.font_small, COLOR_ACCENT, h // 2 + 30)
+            self._center_text("LEFT button = BLUE side", self.font_small, COLOR_LEFT, h // 2 + 30)
+            self._center_text("RIGHT button = RED side", self.font_small, COLOR_RIGHT, h // 2 + 65)
 
         elif self.state == HOLDING:
             self._center_text("HOLD...", self.font_mid, COLOR_TEXT, h // 2 - 80)
@@ -361,23 +377,63 @@ class Game:
         # background track
         pygame.draw.rect(self.screen, COLOR_BAR_BG, (bar_x, bar_y, bar_w, bar_h), border_radius=12)
 
-        # left half (blue) filled up to center, right half (red) filled up to center
+        # Instead of a fixed 50/50 split + a ball marker, the color boundary
+        # itself moves: as LEFT (blue) pulls, marker drops toward MARKER_MIN
+        # and blue visibly swallows more of the bar; as RIGHT (red) pulls,
+        # marker rises toward MARKER_MAX and red swallows more of the bar.
+        ratio = self.marker / 100.0                    # 0 = LEFT/blue wins, 1 = RIGHT/red wins
+        boundary_x = bar_x + int((1.0 - ratio) * bar_w)  # blue occupies [bar_x, boundary_x)
+        blue_w = boundary_x - bar_x
+        red_w = bar_w - blue_w
+
+        # clip to the rounded track so the fills don't spill past the corners
+        clip_rect = pygame.Rect(bar_x, bar_y, bar_w, bar_h)
+        prev_clip = self.screen.get_clip()
+        self.screen.set_clip(clip_rect)
+
+        if blue_w > 0:
+            pygame.draw.rect(self.screen, COLOR_LEFT, (bar_x, bar_y, blue_w, bar_h))
+            self._draw_moving_stripes((bar_x, bar_y, blue_w, bar_h), direction=1)
+        if red_w > 0:
+            pygame.draw.rect(self.screen, COLOR_RIGHT, (boundary_x, bar_y, red_w, bar_h))
+            self._draw_moving_stripes((boundary_x, bar_y, red_w, bar_h), direction=-1)
+
+        self.screen.set_clip(prev_clip)
+        pygame.draw.rect(self.screen, (0, 0, 0), (bar_x, bar_y, bar_w, bar_h), width=3, border_radius=12)
+
+        # bright "tug line" at the live boundary between the two colors,
+        # with a gentle pulse so it reads as active/moving even if no one
+        # has tapped in the last instant
+        pulse = 4 + int(3 * abs(pygame.math.Vector2(1, 0).rotate(self.anim_time * 220).x))
+        pygame.draw.line(self.screen, COLOR_MARKER,
+                          (boundary_x, bar_y - 12), (boundary_x, bar_y + bar_h + 12), pulse)
+
+        # center reference line (where the boundary started)
         center_x = bar_x + bar_w // 2
-        pygame.draw.rect(self.screen, COLOR_LEFT, (bar_x, bar_y, bar_w // 2, bar_h), border_radius=12)
-        pygame.draw.rect(self.screen, COLOR_RIGHT, (center_x, bar_y, bar_w // 2, bar_h), border_radius=12)
+        pygame.draw.line(self.screen, (255, 255, 255, 120), (center_x, bar_y - 6), (center_x, bar_y + bar_h + 6), 1)
 
-        # center line
-        pygame.draw.line(self.screen, (255, 255, 255), (center_x, bar_y - 10), (center_x, bar_y + bar_h + 10), 3)
+        # edge labels, colored to match each side so it's obvious at a glance
+        self._left_text("LEFT (BLUE)", self.font_small, COLOR_LEFT, bar_x, bar_y - 40)
+        self._right_text("RIGHT (RED)", self.font_small, COLOR_RIGHT, bar_x + bar_w, bar_y - 40)
 
-        # marker position: marker 0 -> far left edge, marker 100 -> far right edge
-        ratio = self.marker / 100.0
-        marker_x = int(bar_x + ratio * bar_w)
-        pygame.draw.circle(self.screen, COLOR_MARKER, (marker_x, bar_y + bar_h // 2), 26)
-        pygame.draw.circle(self.screen, (0, 0, 0), (marker_x, bar_y + bar_h // 2), 26, 3)
-
-        # edge labels
-        self._left_text("LEFT", self.font_small, COLOR_TEXT, bar_x, bar_y - 40)
-        self._right_text("RIGHT", self.font_small, COLOR_TEXT, bar_x + bar_w, bar_y - 40)
+    def _draw_moving_stripes(self, rect, direction):
+        """Diagonal stripes that scroll through a colored region over time,
+        so the leading color visibly 'moves' rather than sitting static —
+        this is what shows which side is actively taking over the bar."""
+        x, y, rw, rh = rect
+        if rw <= 0:
+            return
+        stripe_gap = 34
+        speed = 90  # pixels/second of scroll
+        offset = (self.anim_time * speed * direction) % stripe_gap
+        overlay_color = (255, 255, 255, 26)
+        overlay = pygame.Surface((rw, rh), pygame.SRCALPHA)
+        start = -stripe_gap + offset
+        sx = start
+        while sx < rw + rh:
+            pygame.draw.line(overlay, overlay_color, (sx, rh), (sx + rh, 0), 10)
+            sx += stripe_gap
+        self.screen.blit(overlay, (x, y))
 
     def _split_flash(self, winner_side):
         w, h = self.screen.get_size()
