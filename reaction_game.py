@@ -33,9 +33,17 @@ Flow:
                    each second to build pressure. Pressing early here
                    still = FALSE START = you lose.
   6. LIVE        : the instant the countdown hits 0, first press wins.
-  7. RESULT      : split-screen shows the winning side, LEDs flash on
-                   winner's side, buzzer plays a short win sound.
-                   After a few seconds, resets to WAIT_HOLD.
+                   If both players react at the exact same instant, it's
+                   a DRAW instead of a winner.
+  7. DRAW        : shown briefly ("DRAW! Restarting..."), then the round
+                   restarts straight from the ROULETTE step (no need to
+                   re-hold buttons). After 3 draws in a row with no
+                   winner, the game gives up, shows "DRAW GAME!" for a
+                   longer beat, and fully resets to WAIT_HOLD.
+  8. RESULT      : split-screen shows the winning side, buzzer plays a
+                   short win sound. A real win is shown a bit longer on
+                   screen than a false-start result, then resets to
+                   WAIT_HOLD.
 
 Install deps:
   pip install gpiozero pygame --break-system-packages
@@ -76,7 +84,16 @@ BUZZER_PIN = 18
 
 HOLD_SECONDS = 3.0
 HOLD_STEPS = 3      # on-screen "progress dots" while holding, independent of LEDs
-RESULT_DISPLAY_SECONDS = 4.0
+RESULT_DISPLAY_SECONDS = 4.0        # how long a FALSE START result is shown
+WINNER_RESULT_DISPLAY_SECONDS = 7.0  # how long an actual WIN is shown (longer, more celebratory)
+
+# Draw handling: if both players react at the exact same instant, it's a
+# draw. Instead of resetting all the way back to WAIT_HOLD, the round
+# restarts straight from the roulette spin (no need to re-hold buttons).
+# After MAX_DRAWS draws in a row with no winner, the game gives up and
+# fully resets.
+MAX_DRAWS = 3
+DRAW_DISPLAY_SECONDS = 1.6
 
 # Roulette (the "spinning number" reveal of the random countdown time)
 MIN_SUSPENSE_INT = 1
@@ -203,6 +220,7 @@ GO = "GO"
 ROULETTE = "ROULETTE"
 COUNTDOWN = "COUNTDOWN"
 LIVE = "LIVE"
+DRAW = "DRAW"
 RESULT = "RESULT"
 
 
@@ -230,6 +248,9 @@ class Game:
         self.live_start_time = None
         self.winner = None
         self.result_start_time = None
+        self.draw_count = 0
+        self.final_draw = False
+        self.draw_shown_at = None
         self.hw.leds_all(False)
 
     # ---- state handlers -------------------------------------------------
@@ -274,7 +295,7 @@ class Game:
                 self.winner = "RIGHT" if left and not right else \
                                "LEFT" if right and not left else None
                 if self.winner is None:
-                    self.reset_to_wait()
+                    self._enter_draw()
                     return
                 self._enter_result(false_start=True)
                 return
@@ -307,7 +328,7 @@ class Game:
                 self.winner = "RIGHT" if left and not right else \
                                "LEFT" if right and not left else None
                 if self.winner is None:
-                    self.reset_to_wait()
+                    self._enter_draw()
                     return
                 self._enter_result(false_start=True)
                 return
@@ -325,8 +346,8 @@ class Game:
 
         elif self.state == LIVE:
             if left and right:
-                self.winner = None  # tie / simultaneous, no clean winner
-                self.reset_to_wait()
+                self.winner = None  # both hit at the exact same instant -> draw
+                self._enter_draw()
                 return
             if left:
                 self.winner = "LEFT"
@@ -335,8 +356,17 @@ class Game:
                 self.winner = "RIGHT"
                 self._enter_result(false_start=False)
 
+        elif self.state == DRAW:
+            duration = RESULT_DISPLAY_SECONDS if self.final_draw else DRAW_DISPLAY_SECONDS
+            if time.time() - self.draw_shown_at >= duration:
+                if self.final_draw:
+                    self.reset_to_wait()
+                else:
+                    self._start_roulette()  # skip WAIT_HOLD/HOLDING -- straight back to roulette
+
         elif self.state == RESULT:
-            if time.time() - self.result_start_time >= RESULT_DISPLAY_SECONDS:
+            duration = RESULT_DISPLAY_SECONDS if self.false_start else WINNER_RESULT_DISPLAY_SECONDS
+            if time.time() - self.result_start_time >= duration:
                 self.reset_to_wait()
 
     def _start_roulette(self):
@@ -346,6 +376,14 @@ class Game:
         self.roulette_total_flips = random.randint(ROULETTE_MIN_FLIPS, ROULETTE_MAX_FLIPS)
         self.roulette_next_change_time = time.time() + ROULETTE_START_INTERVAL
         self.state = ROULETTE
+
+    def _enter_draw(self):
+        self.draw_count += 1
+        self.final_draw = self.draw_count >= MAX_DRAWS
+        self.state = DRAW
+        self.draw_shown_at = time.time()
+        self.hw.leds_all(False)
+        self.hw.beep(0.2)
 
     def _enter_result(self, false_start):
         self.false_start = false_start
@@ -387,6 +425,18 @@ class Game:
         elif self.state == LIVE:
             self._split_screen(None)
             self._center_text("GO!!", self.font_big, (255, 255, 255), h // 2)
+
+        elif self.state == DRAW:
+            if self.final_draw:
+                self.screen.fill(COLOR_BG)
+                self._center_text("DRAW GAME!", self.font_big, COLOR_ACCENT, h // 2 - 30)
+                self._center_text(f"{MAX_DRAWS} draws in a row — no winner this time",
+                                   self.font_small, COLOR_TEXT, h // 2 + 50)
+            else:
+                self.screen.fill(COLOR_ACCENT)
+                self._center_text("DRAW!", self.font_big, (30, 30, 30), h // 2 - 20)
+                self._center_text(f"Restarting round... (draw {self.draw_count}/{MAX_DRAWS})",
+                                   self.font_small, (30, 30, 30), h // 2 + 60)
 
         elif self.state == RESULT:
             self._split_screen(self.winner)
