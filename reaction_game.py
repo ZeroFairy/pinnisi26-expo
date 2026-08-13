@@ -55,6 +55,7 @@ Run:
   Controls: LEFT SHIFT = LEFT/BLUE player, RIGHT SHIFT = RIGHT/RED player
 """
 
+import os
 import sys
 import time
 import random
@@ -105,6 +106,13 @@ ROULETTE_END_INTERVAL = 0.35    # seconds between flips right before landing (sl
 
 SCREEN_SIZE = (1024, 600)  # change to match your monitor, or use (0,0) for native fullscreen
 FPS = 60
+
+# Glitch-style display font (Rubik Glitch, SIL Open Font License).
+# Bundled in fonts/RubikGlitch-Regular.ttf next to this script. Falls
+# back to the default system font automatically if the file is missing,
+# so the game still runs even if the fonts/ folder didn't come along.
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+GLITCH_FONT_PATH = os.path.join(FONT_DIR, "RubikGlitch-Regular.ttf")
 
 COLOR_BG = (15, 15, 20)
 COLOR_LEFT = (40, 120, 220)
@@ -228,10 +236,27 @@ class Game:
     def __init__(self, hw: Hardware, screen):
         self.hw = hw
         self.screen = screen
-        self.font_big = pygame.font.SysFont("Arial", 96, bold=True)
-        self.font_mid = pygame.font.SysFont("Arial", 48, bold=True)
-        self.font_small = pygame.font.SysFont("Arial", 28)
+        self.font_big, self.font_mid, self.font_small = self._load_fonts()
         self.reset_to_wait()
+
+    @staticmethod
+    def _load_fonts():
+        """Try the bundled glitch font first; fall back to a bold system
+        font if it's missing so the game never crashes over a font file."""
+        try:
+            if os.path.isfile(GLITCH_FONT_PATH):
+                return (
+                    pygame.font.Font(GLITCH_FONT_PATH, 90),
+                    pygame.font.Font(GLITCH_FONT_PATH, 46),
+                    pygame.font.Font(GLITCH_FONT_PATH, 26),
+                )
+        except Exception as e:
+            print(f"[fonts] couldn't load glitch font ({e}), falling back to system font")
+        return (
+            pygame.font.SysFont("Arial", 96, bold=True),
+            pygame.font.SysFont("Arial", 48, bold=True),
+            pygame.font.SysFont("Arial", 28),
+        )
 
     def reset_to_wait(self):
         self.state = WAIT_HOLD
@@ -423,8 +448,10 @@ class Game:
             self._center_text(str(self.countdown_remaining), self.font_big, (200, 30, 30), h // 2 + 10)
 
         elif self.state == LIVE:
-            self._split_screen(None)
-            self._center_text("GO!!", self.font_big, (255, 255, 255), h // 2)
+            # green screen = "go" signal, stays green until someone wins
+            self.screen.fill(COLOR_GO_GREEN)
+            self._center_text("GO!!", self.font_big, (255, 255, 255), h // 2 - 20)
+            self._center_text("TAP YOUR BUTTON NOW", self.font_small, (255, 255, 255), h // 2 + 70)
 
         elif self.state == DRAW:
             if self.final_draw:
