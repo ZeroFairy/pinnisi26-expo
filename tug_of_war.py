@@ -51,6 +51,7 @@ Run:
             so each physical keypress = one tap, just like a real button)
 """
 
+import os
 import sys
 import time
 import argparse
@@ -89,6 +90,13 @@ MARKER_MIN = 0.0          # LEFT wins here
 MARKER_MAX = 100.0        # RIGHT wins here
 
 SCREEN_SIZE = (1024, 600)
+
+# Glitch-style display font (Rubik Glitch, SIL Open Font License).
+# Shared with reaction_game.py -- bundled in fonts/RubikGlitch-Regular.ttf
+# next to this script. Falls back to the default system font automatically
+# if the file is missing.
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+GLITCH_FONT_PATH = os.path.join(FONT_DIR, "RubikGlitch-Regular.ttf")
 FPS = 60
 
 COLOR_BG = (15, 15, 20)
@@ -227,9 +235,31 @@ class Game:
     def __init__(self, hw: Hardware, screen):
         self.hw = hw
         self.screen = screen
-        self.font_big = pygame.font.SysFont("Arial", 90, bold=True)
-        self.font_mid = pygame.font.SysFont("Arial", 46, bold=True)
-        self.font_small = pygame.font.SysFont("Arial", 26)
+        self.font_big, self.font_mid, self.font_small = self._load_fonts()
+        # Clean (non-glitch) fonts used only for the HOLD countdown, since
+        # that's the one spot players need to read a changing count at a
+        # glance -- glitch styling there just makes it harder to track.
+        self.font_clean_big = pygame.font.SysFont("Arial", 90, bold=True)
+        self.font_clean_mid = pygame.font.SysFont("Arial", 46, bold=True)
+
+    @staticmethod
+    def _load_fonts():
+        """Try the bundled glitch font first; fall back to a bold system
+        font if it's missing so the game never crashes over a font file."""
+        try:
+            if os.path.isfile(GLITCH_FONT_PATH):
+                return (
+                    pygame.font.Font(GLITCH_FONT_PATH, 90),
+                    pygame.font.Font(GLITCH_FONT_PATH, 46),
+                    pygame.font.Font(GLITCH_FONT_PATH, 26),
+                )
+        except Exception as e:
+            print(f"[fonts] couldn't load glitch font ({e}), falling back to system font")
+        return (
+            pygame.font.SysFont("Arial", 90, bold=True),
+            pygame.font.SysFont("Arial", 46, bold=True),
+            pygame.font.SysFont("Arial", 26),
+        )
         self.reset_to_wait()
 
     def reset_to_wait(self):
@@ -343,10 +373,10 @@ class Game:
             self._center_text("RIGHT SHIFT = RED side", self.font_small, COLOR_RIGHT, h // 2 + 65)
 
         elif self.state == HOLDING:
-            self._center_text("HOLD...", self.font_mid, COLOR_TEXT, h // 2 - 80)
+            self._center_text("HOLD...", self.font_clean_mid, COLOR_TEXT, h // 2 - 80)
             n = HOLD_STEPS
             dots = "● " * self.leds_lit + "○ " * (n - self.leds_lit)
-            self._center_text(dots, self.font_big, COLOR_ACCENT, h // 2 + 10)
+            self._center_text(dots, self.font_clean_big, COLOR_ACCENT, h // 2 + 10)
 
         elif self.state == GO:
             self.screen.fill(COLOR_GO_GREEN)
