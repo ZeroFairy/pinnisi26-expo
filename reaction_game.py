@@ -237,6 +237,11 @@ class Game:
         self.hw = hw
         self.screen = screen
         self.font_big, self.font_mid, self.font_small = self._load_fonts()
+        # Clean (non-glitch) fonts used only for the HOLD countdown, since
+        # that's the one spot players need to read a changing count at a
+        # glance -- glitch styling there just makes it harder to track.
+        self.font_clean_big = pygame.font.SysFont("Arial", 90, bold=True)
+        self.font_clean_mid = pygame.font.SysFont("Arial", 46, bold=True)
         self.reset_to_wait()
 
     @staticmethod
@@ -430,10 +435,10 @@ class Game:
 
         elif self.state == HOLDING:
             elapsed = time.time() - self.hold_start_time
-            self._center_text("HOLD...", self.font_mid, COLOR_TEXT, h // 2 - 80)
+            self._center_text("HOLD...", self.font_clean_mid, COLOR_TEXT, h // 2 - 80)
             n = HOLD_STEPS
             dots = "● " * self.leds_lit + "○ " * (n - self.leds_lit)
-            self._center_text(dots, self.font_big, COLOR_ACCENT, h // 2 + 10)
+            self._center_text(dots, self.font_clean_big, COLOR_ACCENT, h // 2 + 10)
 
         elif self.state == GO:
             self.screen.fill(COLOR_GO_GREEN)
