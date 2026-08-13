@@ -90,14 +90,13 @@ MARKER_MIN = 0.0          # LEFT wins here
 MARKER_MAX = 100.0        # RIGHT wins here
 
 SCREEN_SIZE = (1024, 600)
+FPS = 60
 
 # Glitch-style display font (Rubik Glitch, SIL Open Font License).
-# Shared with reaction_game.py -- bundled in fonts/RubikGlitch-Regular.ttf
-# next to this script. Falls back to the default system font automatically
-# if the file is missing.
+# Bundled in fonts/RubikGlitch-Regular.ttf next to this script. Falls
+# back to the default system font automatically if the file is missing.
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 GLITCH_FONT_PATH = os.path.join(FONT_DIR, "RubikGlitch-Regular.ttf")
-FPS = 60
 
 COLOR_BG = (15, 15, 20)
 COLOR_LEFT = (40, 120, 220)
@@ -241,6 +240,7 @@ class Game:
         # glance -- glitch styling there just makes it harder to track.
         self.font_clean_big = pygame.font.SysFont("Arial", 90, bold=True)
         self.font_clean_mid = pygame.font.SysFont("Arial", 46, bold=True)
+        self.reset_to_wait()
 
     @staticmethod
     def _load_fonts():
@@ -260,7 +260,6 @@ class Game:
             pygame.font.SysFont("Arial", 46, bold=True),
             pygame.font.SysFont("Arial", 26),
         )
-        self.reset_to_wait()
 
     def reset_to_wait(self):
         self.state = WAIT_HOLD
