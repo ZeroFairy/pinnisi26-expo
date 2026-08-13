@@ -3,28 +3,30 @@
 Two-Player Tug-of-War Game — Raspberry Pi 5
 =============================================
 
-Hardware (BCM pin numbers) — same wiring as reaction_game.py:
-  Button 1 (Player LEFT)  -> GPIO17 -> GND   [ = BLUE side on screen ]
-  Button 2 (Player RIGHT) -> GPIO27 -> GND   [ = RED side on screen  ]
-  LED 1                   -> GPIO5  (+resistor) -> GND
-  LED 2                   -> GPIO6  (+resistor) -> GND
-  LED 3                   -> GPIO13 (+resistor) -> GND
+Hardware — same wiring style as reaction_game.py:
   Buzzer (active buzzer)  -> GPIO18 -> GND
   Monitor                 -> HDMI (pygame fullscreen)
 
-  >>> Button/color match-up: whichever physical button is wired to
-      GPIO17 (LEFT) always controls the BLUE side of the bar, and the
-      button on GPIO27 (RIGHT) always controls the RED side. In --sim
-      mode, "A"/Left-arrow = BLUE (left), "L"/Right-arrow = RED (right).
-      The in-game screen also prints these labels during WAIT_HOLD and
-      TUG so it's visible at a glance while playing.
+  >>> No physical buttons needed. Both players use the keyboard:
+        LEFT SHIFT  -> LEFT player  [ = BLUE side on the bar ]
+        RIGHT SHIFT -> RIGHT player [ = RED side on the bar  ]
+      Hold both to arm a round, then tap (press) your key repeatedly
+      during TUG to pull. This works the same with real GPIO (buzzer)
+      or with --sim. The old physical-button wiring (GPIO17/GPIO27) is
+      left commented in the Config section below in case you want to
+      wire real arcade buttons back in later.
+
+  >>> LEDs are currently disabled. The wiring + control code is still
+      here, just commented out (see LED_PINS and the Hardware class),
+      so you can re-enable them any time by uncommenting.
 
 Flow:
-  1. WAIT_HOLD : both players hold their button together to arm the round.
-  2. HOLDING   : hold for 3 seconds, one LED lights per second.
+  1. WAIT_HOLD : both players hold LEFT SHIFT + RIGHT SHIFT together to
+                 arm the round.
+  2. HOLDING   : hold for 3 seconds (on-screen dots fill in).
   3. GO        : buzzer beeps, screen flashes "PULL!" and the tug bar
                  starts as an even 50/50 blue/red split.
-  4. TUG       : each button TAP (press edge, not hold) pulls the color
+  4. TUG       : each key TAP (press edge, not hold) pulls the color
                  boundary toward your side. Instead of a ball/marker,
                  your color itself visibly grows and creeps across the
                  bar as you win ground — moving diagonal stripes animate
@@ -32,23 +34,21 @@ Flow:
                  which side is taking over. The boundary also slowly
                  drifts back to center every frame, so mashing
                  continuously is required to keep winning — a single tap
-                 won't hold it. LEDs mirror how close your color is to
-                 fully covering the bar (all 3 lit = one tap-streak away
-                 from winning).
+                 won't hold it.
   5. RESULT    : whoever's color fully covers the bar wins. Split-screen
-                 flash on the monitor + LED blink + buzzer fanfare, then
-                 auto-resets to WAIT_HOLD.
+                 flash on the monitor + buzzer fanfare, then auto-resets
+                 to WAIT_HOLD.
 
 Install deps:
   pip install gpiozero pygame --break-system-packages
 
 Run:
   python3 tug_of_war.py
-  (add --sim to run without real GPIO hardware, using keyboard keys)
-  Sim controls: mash "A" (or Left-arrow) for LEFT/BLUE,
-                mash "L" (or Right-arrow) for RIGHT/RED
-  (tap repeatedly, key-repeat is disabled so each physical keypress =
-  one tap, just like a real button)
+  (add --sim to run without real GPIO hardware — buzzer becomes a no-op;
+  keyboard controls are always active either way)
+  Controls: hold LEFT SHIFT + RIGHT SHIFT to arm, then mash your own
+            SHIFT key to pull (tap repeatedly — key-repeat is disabled
+            so each physical keypress = one tap, just like a real button)
 """
 
 import sys
@@ -60,20 +60,25 @@ import pygame
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BTN_LEFT_PIN = 17
-BTN_RIGHT_PIN = 27
-# Currently only 2 LEDs wired up. LED 3 is commented out for now —
-# when you add the 3rd LED, just uncomment its pin below and it will
-# automatically be picked up everywhere (countdown, progress, blink),
-# since all LED logic scales off len(LED_PINS).
-LED_PINS = [
-    5,
-    6,
-    # 13,  # LED 3 -- uncomment once wired up
-]
+# Buttons are no longer needed -- both players use the keyboard instead
+# (LEFT SHIFT / RIGHT SHIFT, see Hardware.set_key below). Kept here,
+# commented, in case you want to wire real arcade buttons back in later.
+# BTN_LEFT_PIN = 17
+# BTN_RIGHT_PIN = 27
+
+# LEDs are currently disabled. Uncomment LED_PINS below (and the LED
+# lines inside the Hardware class) to bring them back -- all LED logic
+# already scales off len(LED_PINS), so nothing else needs to change.
+# LED_PINS = [
+#     5,
+#     6,
+#     13,
+# ]
+LED_PINS = []
 BUZZER_PIN = 18
 
 HOLD_SECONDS = 3.0
+HOLD_STEPS = 3      # on-screen "progress dots" while holding, independent of LEDs
 RESULT_DISPLAY_SECONDS = 4.0
 
 # Tug-of-war tuning
@@ -91,6 +96,7 @@ COLOR_LEFT = (40, 120, 220)
 COLOR_RIGHT = (220, 60, 60)
 COLOR_TEXT = (240, 240, 240)
 COLOR_ACCENT = (250, 210, 60)
+COLOR_GO_GREEN = (34, 197, 94)
 COLOR_BAR_BG = (40, 40, 46)
 COLOR_MARKER = (255, 255, 255)
 
@@ -98,80 +104,82 @@ COLOR_MARKER = (255, 255, 255)
 # Hardware layer — real GPIO or keyboard simulation
 # ---------------------------------------------------------------------------
 class Hardware:
+    """Wraps gpiozero (buzzer only) plus keyboard input. Player input is
+    always the keyboard — LEFT SHIFT / RIGHT SHIFT — no physical
+    buttons required, on real hardware or with --sim."""
+
     def __init__(self, simulate=False):
         self.simulate = simulate
-        self._sim_left_taps = 0
-        self._sim_right_taps = 0
-        self.num_leds = len(LED_PINS)  # everything below scales off this
+        self._left_held = False
+        self._right_held = False
+        self._left_taps = 0
+        self._right_taps = 0
+
+        self.num_leds = len(LED_PINS)  # 0 while LEDs are disabled
 
         if not simulate:
-            from gpiozero import Button, LED, Buzzer
-            self.btn_left = Button(BTN_LEFT_PIN, pull_up=True, bounce_time=0.02)
-            self.btn_right = Button(BTN_RIGHT_PIN, pull_up=True, bounce_time=0.02)
-            self.leds = [LED(pin) for pin in LED_PINS]
+            from gpiozero import Buzzer
+            # from gpiozero import LED
+            # self.leds = [LED(pin) for pin in LED_PINS]
+            self.leds = None
             self.buzzer = Buzzer(BUZZER_PIN)
-            self._left_was_pressed = False
-            self._right_was_pressed = False
         else:
-            self.btn_left = None
-            self.btn_right = None
             self.leds = None
             self.buzzer = None
 
     # --- raw held-state (used for the "hold both to start" phase) ---
     def left_held(self):
-        if self.simulate:
-            return self._sim_left_taps > 0  # not used for holding in sim, see key handling
-        return self.btn_left.is_pressed
+        return self._left_held
 
     def right_held(self):
-        if self.simulate:
-            return self._sim_right_taps > 0
-        return self.btn_right.is_pressed
+        return self._right_held
+
+    def set_key(self, key, is_down):
+        """Call on every KEYDOWN/KEYUP for LEFT SHIFT / RIGHT SHIFT.
+        Every KEYDOWN also counts as one tap, since OS key-repeat is
+        disabled in main() so each physical keypress fires exactly once."""
+        if key == pygame.K_LSHIFT:
+            self._left_held = is_down
+            if is_down:
+                self._left_taps += 1
+        elif key == pygame.K_RSHIFT:
+            self._right_held = is_down
+            if is_down:
+                self._right_taps += 1
 
     # --- tap edge detection: returns number of NEW presses since last call ---
     def poll_taps(self):
         """Returns (left_taps, right_taps) counted since the last call."""
-        if self.simulate:
-            lt, rt = self._sim_left_taps, self._sim_right_taps
-            self._sim_left_taps = 0
-            self._sim_right_taps = 0
-            return lt, rt
+        lt, rt = self._left_taps, self._right_taps
+        self._left_taps = 0
+        self._right_taps = 0
+        return lt, rt
 
-        left_now = self.btn_left.is_pressed
-        right_now = self.btn_right.is_pressed
-        left_tap = 1 if (left_now and not self._left_was_pressed) else 0
-        right_tap = 1 if (right_now and not self._right_was_pressed) else 0
-        self._left_was_pressed = left_now
-        self._right_was_pressed = right_now
-        return left_tap, right_tap
-
-    def register_sim_tap(self, key):
-        if key in (pygame.K_LEFT, pygame.K_a):
-            self._sim_left_taps += 1
-        elif key in (pygame.K_RIGHT, pygame.K_l):
-            self._sim_right_taps += 1
-
-    # --- LEDs ---
+    # --- LEDs (disabled -- uncomment LED_PINS above + the lines below
+    # to re-enable; everything that calls these already works fine
+    # with them as no-ops) ---
     def leds_set(self, count_on):
-        if self.simulate:
-            return
-        for i, led in enumerate(self.leds):
-            led.value = 1 if i < count_on else 0
+        pass
+        # if self.simulate or not self.leds:
+        #     return
+        # for i, led in enumerate(self.leds):
+        #     led.value = 1 if i < count_on else 0
 
     def leds_all(self, on):
-        self.leds_set(self.num_leds if on else 0)
+        pass
+        # self.leds_set(self.num_leds if on else 0)
 
     def leds_blink(self, times=3, interval=0.12):
-        if self.simulate:
-            return
-        for _ in range(times):
-            for led in self.leds:
-                led.on()
-            time.sleep(interval)
-            for led in self.leds:
-                led.off()
-            time.sleep(interval)
+        pass
+        # if self.simulate or not self.leds:
+        #     return
+        # for _ in range(times):
+        #     for led in self.leds:
+        #         led.on()
+        #     time.sleep(interval)
+        #     for led in self.leds:
+        #         led.off()
+        #     time.sleep(interval)
 
     # --- buzzer ---
     def beep(self, duration=0.1):
@@ -199,8 +207,9 @@ class Hardware:
 
     def cleanup(self):
         if not self.simulate:
-            for led in self.leds:
-                led.off()
+            # if self.leds:
+            #     for led in self.leds:
+            #         led.off()
             self.buzzer.off()
 
 
@@ -215,10 +224,9 @@ RESULT = "RESULT"
 
 
 class Game:
-    def __init__(self, hw: Hardware, screen, simulate):
+    def __init__(self, hw: Hardware, screen):
         self.hw = hw
         self.screen = screen
-        self.simulate = simulate
         self.font_big = pygame.font.SysFont("Arial", 90, bold=True)
         self.font_mid = pygame.font.SysFont("Arial", 46, bold=True)
         self.font_small = pygame.font.SysFont("Arial", 26)
@@ -234,23 +242,8 @@ class Game:
         self.last_frame_time = time.time()
         self.anim_time = 0.0  # drives the moving stripes on the leading color
         self.hw.leds_all(False)
-        # drain any queued sim taps so they don't leak into next round
+        # drain any queued taps so they don't leak into next round
         self.hw.poll_taps()
-
-    # For WAIT_HOLD in sim mode we need actual "held" state, so track keys down
-    def set_sim_held(self, left, right):
-        self._sim_left_held = left
-        self._sim_right_held = right
-
-    def _held_left(self):
-        if self.simulate:
-            return getattr(self, "_sim_left_held", False)
-        return self.hw.left_held()
-
-    def _held_right(self):
-        if self.simulate:
-            return getattr(self, "_sim_right_held", False)
-        return self.hw.right_held()
 
     # ---- state handlers -------------------------------------------------
     def update(self):
@@ -261,25 +254,24 @@ class Game:
 
         if self.state == WAIT_HOLD:
             self.hw.poll_taps()  # discard stray taps
-            if self._held_left() and self._held_right():
+            if self.hw.left_held() and self.hw.right_held():
                 self.state = HOLDING
                 self.hold_start_time = now
                 self.leds_lit = 0
                 self.hw.leds_set(0)
 
         elif self.state == HOLDING:
-            if not (self._held_left() and self._held_right()):
+            if not (self.hw.left_held() and self.hw.right_held()):
                 self.reset_to_wait()
                 return
             elapsed = now - self.hold_start_time
-            n = self.hw.num_leds
-            # spread the LED-per-second lighting evenly across HOLD_SECONDS,
-            # regardless of how many LEDs are currently wired up
+            n = HOLD_STEPS
+            # spread the progress-dot lighting evenly across HOLD_SECONDS
             step = HOLD_SECONDS / n
             target_lit = min(n, int(elapsed // step) + 1) if elapsed < HOLD_SECONDS else n
             if target_lit != self.leds_lit:
                 self.leds_lit = target_lit
-                self.hw.leds_set(self.leds_lit)
+                self.hw.leds_set(self.leds_lit)  # no-op while LEDs are disabled
             if elapsed >= HOLD_SECONDS:
                 self.state = GO
                 self.hw.leds_all(True)
@@ -308,15 +300,16 @@ class Game:
 
             self.marker = max(MARKER_MIN, min(MARKER_MAX, self.marker))
 
-            # LEDs show how close the LEADING side is to winning (0..num_leds lit)
-            n = self.hw.num_leds
+            # on-screen "progress dots" show how close the LEADING side is
+            # to winning (0..HOLD_STEPS), independent of physical LEDs
+            n = HOLD_STEPS
             distance_from_center = abs(self.marker - MARKER_START)
             max_distance = MARKER_START - MARKER_MIN  # symmetric
             progress_ratio = distance_from_center / max_distance if max_distance else 0
             lit = min(n, int(progress_ratio * n))
             if lit != self.leds_lit:
                 self.leds_lit = lit
-                self.hw.leds_set(lit)
+                self.hw.leds_set(lit)  # no-op while LEDs are disabled
                 if lit > 0:
                     self.hw.tick()
 
@@ -335,7 +328,7 @@ class Game:
     def _enter_result(self):
         self.state = RESULT
         self.result_start_time = time.time()
-        self.hw.leds_blink(times=self.hw.num_leds, interval=0.12)
+        self.hw.leds_blink(times=3, interval=0.12)
         self.hw.leds_all(True)
         self.hw.win_fanfare()
 
@@ -345,22 +338,23 @@ class Game:
         self.screen.fill(COLOR_BG)
 
         if self.state == WAIT_HOLD:
-            self._center_text("HOLD BOTH BUTTONS TO START", self.font_mid, COLOR_TEXT, h // 2 - 40)
-            self._center_text("LEFT button = BLUE side", self.font_small, COLOR_LEFT, h // 2 + 30)
-            self._center_text("RIGHT button = RED side", self.font_small, COLOR_RIGHT, h // 2 + 65)
+            self._center_text("HOLD LEFT SHIFT + RIGHT SHIFT TO START", self.font_mid, COLOR_TEXT, h // 2 - 40)
+            self._center_text("LEFT SHIFT = BLUE side", self.font_small, COLOR_LEFT, h // 2 + 30)
+            self._center_text("RIGHT SHIFT = RED side", self.font_small, COLOR_RIGHT, h // 2 + 65)
 
         elif self.state == HOLDING:
             self._center_text("HOLD...", self.font_mid, COLOR_TEXT, h // 2 - 80)
-            n = self.hw.num_leds
+            n = HOLD_STEPS
             dots = "● " * self.leds_lit + "○ " * (n - self.leds_lit)
             self._center_text(dots, self.font_big, COLOR_ACCENT, h // 2 + 10)
 
         elif self.state == GO:
-            self._center_text("PULL!!", self.font_big, COLOR_ACCENT, h // 2)
+            self.screen.fill(COLOR_GO_GREEN)
+            self._center_text("PULL!!", self.font_big, (255, 255, 255), h // 2)
 
         elif self.state == TUG:
             self._draw_bar()
-            self._center_text("TAP YOUR BUTTON!", self.font_small, COLOR_TEXT, 60)
+            self._center_text("MASH YOUR SHIFT KEY!", self.font_small, COLOR_TEXT, 60)
 
         elif self.state == RESULT:
             self._draw_bar()
@@ -413,8 +407,8 @@ class Game:
         pygame.draw.line(self.screen, (255, 255, 255, 120), (center_x, bar_y - 6), (center_x, bar_y + bar_h + 6), 1)
 
         # edge labels, colored to match each side so it's obvious at a glance
-        self._left_text("LEFT (BLUE)", self.font_small, COLOR_LEFT, bar_x, bar_y - 40)
-        self._right_text("RIGHT (RED)", self.font_small, COLOR_RIGHT, bar_x + bar_w, bar_y - 40)
+        self._left_text("LEFT SHIFT (BLUE)", self.font_small, COLOR_LEFT, bar_x, bar_y - 40)
+        self._right_text("RIGHT SHIFT (RED)", self.font_small, COLOR_RIGHT, bar_x + bar_w, bar_y - 40)
 
     def _draw_moving_stripes(self, rect, direction):
         """Diagonal stripes that scroll through a colored region over time,
@@ -469,7 +463,8 @@ class Game:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sim", action="store_true",
-                         help="Run without GPIO hardware; use A (left) / L (right) keys to simulate buttons")
+                         help="Run without real GPIO hardware (buzzer becomes a no-op). "
+                              "Keyboard controls (LEFT SHIFT / RIGHT SHIFT) work either way.")
     parser.add_argument("--fullscreen", action="store_true", help="Run in true fullscreen")
     args = parser.parse_args()
 
@@ -482,10 +477,7 @@ def main():
     pygame.display.set_caption("Tug of War")
     clock = pygame.time.Clock()
 
-    game = Game(hw, screen, simulate=args.sim)
-
-    sim_left_held = False
-    sim_right_held = False
+    game = Game(hw, screen)
 
     running = True
     try:
@@ -496,21 +488,10 @@ def main():
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
-                    elif args.sim:
-                        if event.key in (pygame.K_LEFT, pygame.K_a):
-                            sim_left_held = True
-                        elif event.key in (pygame.K_RIGHT, pygame.K_l):
-                            sim_right_held = True
-                        hw.register_sim_tap(event.key)
+                    else:
+                        hw.set_key(event.key, True)
                 elif event.type == pygame.KEYUP:
-                    if args.sim:
-                        if event.key in (pygame.K_LEFT, pygame.K_a):
-                            sim_left_held = False
-                        elif event.key in (pygame.K_RIGHT, pygame.K_l):
-                            sim_right_held = False
-
-            if args.sim:
-                game.set_sim_held(sim_left_held, sim_right_held)
+                    hw.set_key(event.key, False)
 
             game.update()
             game.draw()
